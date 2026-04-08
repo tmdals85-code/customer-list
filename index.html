@@ -18,11 +18,12 @@
         th { background: #172554; color: #93c5fd; position: sticky; top: 0; z-index: 10; }
         td { color: var(--text-sub); }
         .client-name { font-weight: 700; color: var(--text-main); }
-        .badge { padding: 3px 8px; border-radius: 10px; font-size: 10px; display: inline-block; border: 1px solid #475569; }
+        .badge { padding: 3px 8px; border-radius: 10px; font-size: 10px; display: inline-block; border: 1px solid #475569; font-weight: bold; }
         .status-green { background: rgba(16, 185, 129, 0.2); color: #34d399; border-color: #059669; }
         .status-purple { background: rgba(139, 92, 246, 0.2); color: #a78bfa; border-color: #7c3aed; }
+        .status-blue { background: rgba(59, 130, 246, 0.2); color: #60a5fa; border-color: #1d4ed8; }
         .loading { text-align: center; padding: 40px; color: #94a3b8; }
-        .refresh-btn { background: #2563eb; border: none; color: white; padding: 6px 14px; border-radius: 15px; cursor: pointer; font-size: 12px; margin-left: 10px; }
+        .refresh-btn { background: #2563eb; border: none; color: white; padding: 6px 14px; border-radius: 20px; cursor: pointer; font-size: 12px; margin-left: 10px; }
     </style>
 </head>
 <body>
@@ -49,7 +50,7 @@
                     </tr>
                 </thead>
                 <tbody id="tableBody">
-                    <tr><td colspan="11" class="loading">데이터 동기화 중...</td></tr>
+                    <tr><td colspan="11" class="loading">데이터를 정렬 중입니다...</td></tr>
                 </tbody>
             </table>
         </div>
@@ -63,51 +64,52 @@
         async function loadData() {
             const tbody = document.getElementById('tableBody');
             const timestamp = new Date().getTime();
-            // 가장 안정적인 corsproxy.io 사용
             const proxyUrl = `https://corsproxy.io/?${encodeURIComponent(SHEET_URL + "&t=" + timestamp)}`;
 
             try {
                 const response = await fetch(proxyUrl);
                 const data = await response.text();
-                const rows = parseCSV(data);
+                const rows = parseRobustCSV(data);
                 
-                // 수임일자(Index 1) 기준 내림차순 정렬 (데이터가 있을 때만)
+                // 수임일자(Index 1) 기준 내림차순 정렬
                 rows.sort((a, b) => {
-                    if(!a[1] || a[1] === '-') return 1;
-                    if(!b[1] || b[1] === '-') return -1;
-                    return new Date(b[1]) - new Date(a[1]);
+                    const dateA = a[1] ? new Date(a[1].replace(/[^0-9-]/g, '')) : new Date(0);
+                    const dateB = b[1] ? new Date(b[1].replace(/[^0-9-]/g, '')) : new Date(0);
+                    return dateB - dateA;
                 });
 
                 renderTable(rows);
             } catch (err) {
-                tbody.innerHTML = `<tr><td colspan="11" class="loading" style="color:#ff6b6b">❌ 연결 오류: 새로고침을 눌러보세요.</td></tr>`;
+                tbody.innerHTML = `<tr><td colspan="11" class="loading" style="color:#ff6b6b">❌ 데이터 로드 실패: 새로고침을 시도하세요.</td></tr>`;
             }
         }
 
-        // [수정된 부분] 빈 칸을 정확하게 인식하는 CSV 파서
-        function parseCSV(csv) {
+        // [핵심] 줄바꿈과 쉼표를 완벽하게 분리하는 특수 파서
+        function parseRobustCSV(csv) {
             const rows = [];
-            const lines = csv.trim().split(/\r?\n/);
-            
-            for (let i = 1; i < lines.length; i++) {
-                let line = lines[i];
-                if (!line) continue;
+            let row = [];
+            let cell = '';
+            let inQuotes = false;
 
-                let cells = [];
-                let current = '';
-                let inQuotes = false;
+            for (let i = 0; i < csv.length; i++) {
+                let char = csv[i];
+                let nextChar = csv[i+1];
 
-                for (let char of line) {
-                    if (char === '"') inQuotes = !inQuotes;
-                    else if (char === ',' && !inQuotes) {
-                        cells.push(current.trim());
-                        current = '';
-                    } else current += char;
-                }
-                cells.push(current.trim());
-                rows.push(cells);
+                if (char === '"') {
+                    if (inQuotes && nextChar === '"') { cell += '"'; i++; } // 큰따옴표 이스케이프 처리
+                    else { inQuotes = !inQuotes; }
+                } 
+                else if (char === ',' && !inQuotes) { row.push(cell.trim()); cell = ''; } 
+                else if ((char === '\r' || char === '\n') && !inQuotes) {
+                    if (char === '\r' && nextChar === '\n') i++;
+                    row.push(cell.trim());
+                    if (row.length > 0) rows.push(row);
+                    row = []; cell = '';
+                } 
+                else { cell += char; }
             }
-            return rows;
+            if (cell || row.length > 0) { row.push(cell.trim()); rows.push(row); }
+            return rows.slice(1); // 헤더 제외
         }
 
         function renderTable(rows) {
@@ -118,16 +120,23 @@
                 const tr = document.createElement('tr');
                 let html = `<td class="row-number">${index + 1}</td>`;
                 
-                // 시트의 A열(0)부터 J열(9)까지 순서대로 매칭
+                // 시트 데이터 매칭 (A~J열까지 총 10개)
                 for (let i = 0; i < 10; i++) {
                     let text = row[i] ? row[i] : '-';
-                    if (i === 0) text = `<span class="client-name">${text}</span>`;
                     
-                    // 수수료나 진행상태 강조
-                    if (['완료', '입금', '종결'].some(k => text.includes(k))) {
-                        text = `<span class="badge status-green">${text}</span>`;
-                    } else if (['진행', '조사', '청구', '산재', '교통사고'].some(k => text.includes(k))) {
-                        text = `<span class="badge status-purple">${text}</span>`;
+                    if (i === 0) {
+                        text = `<span class="client-name">${text}</span>`;
+                    }
+                    
+                    // 특정 열에만 뱃지 적용 (사고유형, 수수료, 진행사항 등)
+                    if (i === 3 || i === 4 || i === 9) { // 사고유형, 수수료, 종결일자
+                         if (['완료', '입금', '종결'].some(k => text.includes(k))) {
+                            text = `<span class="badge status-green">${text}</span>`;
+                        } else if (['진행', '조사', '산재', '상해', '질병'].some(k => text.includes(k))) {
+                            text = `<span class="badge status-purple">${text}</span>`;
+                        } else if (text !== '-') {
+                            text = `<span class="badge status-blue">${text}</span>`;
+                        }
                     }
                     html += `<td>${text}</td>`;
                 }
